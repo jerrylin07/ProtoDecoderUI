@@ -1,206 +1,342 @@
+import fs from "fs";
+import path from "path";
 import { b64Decode } from "../utils";
 import { requestMessagesResponses } from "../constants";
 import { DecodedProto } from "../types";
-
-// 放在 proto-parser.ts 顶部附近
-// 把 protobuf 消息解成普通对象：枚举=数字，int64=number，不补默认值；仅给枚举补 0
-function decodeToPlain(Type: any, b64: string) {
-    const buf = b64Decode(b64);
-    if (!buf || !buf.length) return null;
-  
-    const msg = Type.decode(buf);
-  
-    // 关键：defaults=false，防止 int32/bool 等未下发字段被补成 0/false
-    const obj = Type.toObject(msg, {
-      enums: Number,   // 枚举输出数字
-      longs: Number,   // int64 → number（时间戳安全；若担心超大整数字段可换成 String）
-      bytes: String,
-      defaults: false,
-    });
-  
-    // 仅给“枚举字段”补默认 0（非枚举不补）
-    addEnumZeroDefaults(obj, Type);
-    return obj;
+/**
+ * Output shape control for decoded results.
+ * - "full": { methodId, methodName, data }
+ * - "data": just the inner `data` object (matches current dump format)
+ */
+export type OutputShape = "full" | "data";
+// Track the current social action method id between paired request/response.
+let currentSocialActionMethodId = 0;
+// ──────────────────────────────────────────────────────────────────────────────
+//  Utilities — time stamp & file naming
+// ──────────────────────────────────────────────────────────────────────────────
+const padTwoDigits = (value: number) => String(value).padStart(2, "0");
+const padThreeDigits = (value: number) => String(value).padStart(3, "0");
+/** UTC compact timestamp: YYYYMMDDTHHMMSSmmm */
+function formatUtcTimestampCompact(milliseconds: number): string {
+  const dt = new Date(milliseconds);
+  return (
+    dt.getUTCFullYear().toString() +
+    padTwoDigits(dt.getUTCMonth() + 1) +
+    padTwoDigits(dt.getUTCDate()) +
+    "T" +
+    padTwoDigits(dt.getUTCHours()) +
+    padTwoDigits(dt.getUTCMinutes()) +
+    padTwoDigits(dt.getUTCSeconds()) +
+    padThreeDigits(dt.getUTCMilliseconds())
+  );
+}
+function sanitizeFileName(input?: string): string {
+  return (input ?? "")
+    .trim()
+    .replace(/\s+/g, "_")
+    .replace(/[^A-Za-z0-9._-]/g, "");
+}
+function ensureDirectory(directoryPath: string) {
+  fs.mkdirSync(directoryPath, { recursive: true });
+}
+/**
+ * Write one JSON file per method call (request/response), like the original behavior.
+ * Subdirectories separate parser vs unparser versions.
+ * Filename: <methodName>_<YYYYMMDDTHHMMSSmmm>_<request|response>.json
+ * IMPORTANT: both parser & unparser dumps only write the `data` object, and
+ *            share the same baseTimestampMs per call to keep them aligned.
+ */
+function writePerMethodJsonDump(
+  variant: "parser" | "unparser",
+  methodName: string,
+  baseTimestampMs: number,
+  direction: "request" | "response",
+  dataOnlyPayload: any
+): string {
+  const rootDir = path.resolve(process.cwd(), "dumps", variant);
+  ensureDirectory(rootDir);
+  const safeMethod = sanitizeFileName(methodName || "METHOD_unknown");
+  const filename = `${safeMethod}_${formatUtcTimestampCompact(
+    baseTimestampMs
+  )}_${direction}.json`;
+  const filePath = path.join(rootDir, filename);
+  // 仅保留 data 字典写入
+  fs.writeFileSync(filePath, JSON.stringify(dataOnlyPayload, null, 2), "utf8");
+  return filePath;
+}
+// ──────────────────────────────────────────────────────────────────────────────
+//  Helpers — decoding with explicit rules and enum-default synthesis
+// ──────────────────────────────────────────────────────────────────────────────
+/**
+ * Decode a protobuf message instance into a plain JavaScript object with explicit rules:
+ * - enums → Number (keep numeric values)
+ * - int64 → Number (safe for timestamps; beware of very large ids)
+ * - defaults → false (do NOT synthesize default 0/false/"" for missing scalar fields)
+ * - bytes → String
+ * Then, only for missing enum fields, synthesize value 0 to make them explicit.
+ */
+export function decodeMessageToPlainObject(
+  ProtoType: any,
+  base64Payload: string
+) {
+  const binaryBuffer = b64Decode(base64Payload);
+  if (!binaryBuffer || !binaryBuffer.length) return null;
+  const message = ProtoType.decode(binaryBuffer);
+  const plainObject = ProtoType.toObject(message, {
+    enums: Number,
+    longs: Number,
+    bytes: String,
+    defaults: false,
+  });
+  addMissingEnumZeroDefaultsRecursively(plainObject, ProtoType);
+  return plainObject;
+}
+/**
+ * Recursively add explicit 0 only for missing enum fields (do not synthesize defaults for non-enum fields).
+ * Handles nested messages, repeated fields, and map fields.
+ */
+export function addMissingEnumZeroDefaultsRecursively(
+  targetObject: any,
+  ProtoType: any
+): void {
+  if (!targetObject || !ProtoType?.fieldsArray) return;
+  for (const field of ProtoType.fieldsArray) {
+    const fieldName = field.name;
+    const currentValue = targetObject[fieldName];
+    const resolvedType = (field as any).resolvedType;
+    // map<key, value>
+    if (field.map) {
+      const mapValue = targetObject[fieldName];
+      if (mapValue && resolvedType?.fieldsArray) {
+        for (const key of Object.keys(mapValue)) {
+          addMissingEnumZeroDefaultsRecursively(mapValue[key], resolvedType);
+        }
+      }
+      continue;
+    }
+    // repeated
+    if (field.repeated) {
+      if (Array.isArray(currentValue) && resolvedType?.fieldsArray) {
+        for (const item of currentValue) {
+          addMissingEnumZeroDefaultsRecursively(item, resolvedType);
+        }
+      }
+      continue;
+    }
+    // enum: if missing, add 0
+    if (resolvedType && resolvedType.values && currentValue === undefined) {
+      targetObject[fieldName] = 0;
+      continue;
+    }
+    // nested message
+    if (
+      resolvedType?.fieldsArray &&
+      currentValue &&
+      typeof currentValue === "object"
+    ) {
+      addMissingEnumZeroDefaultsRecursively(currentValue, resolvedType);
+    }
   }
-  
-  // 递归：只在“枚举字段缺失”时写入 0；嵌套/数组/map 都处理
-  function addEnumZeroDefaults(obj: any, Type: any): void {
-    if (!obj || !Type || !Array.isArray(Type.fieldsArray)) return;
-  
-    for (const f of Type.fieldsArray) {
-      const name = f.name;
-      const val = obj[name];
-      const rt  = (f as any).resolvedType;
-  
-      // map<key, value>
-      if (f.map) {
-        const mapVal = obj[name];
-        if (mapVal && rt && rt.fieldsArray) {
-          for (const k of Object.keys(mapVal)) {
-            addEnumZeroDefaults(mapVal[k], rt);
+}
+// ──────────────────────────────────────────────────────────────────────────────
+//  Social payload decoder (dynamic nested decode)
+// ──────────────────────────────────────────────────────────────────────────────
+/**
+ * Returns decoded proto as JSON-like plain object. Uses tuples by requestMessagesResponses.
+ * This function is used for social action payloads (dynamic nested decode).
+ */
+function DecoderInternalPayloadAsResponse(
+  methodId: number,
+  base64Data: any
+): any {
+  let result: any = { Not_Implemented_yet: base64Data };
+  for (const [, methodTupleAny] of Object.entries(requestMessagesResponses)) {
+    const methodTuple = methodTupleAny as any; // [id, RequestType?, ResponseType?]
+    const tupleRequestOrResponseId = methodTuple[0];
+    if (tupleRequestOrResponseId === methodId) {
+      // Response type exists and payload is decodable.
+      if (
+        methodTuple[2] != null &&
+        typeof base64Data === "string" &&
+        base64Data &&
+        b64Decode(base64Data)?.length
+      ) {
+        try {
+          result = decodeMessageToPlainObject(methodTuple[2], base64Data);
+        } catch (error) {
+          console.error(
+            `Internal ProxySocial decoder ${tupleRequestOrResponseId} Error: ${error}`
+          );
+          result = { Error: error, Data: base64Data };
+        }
+      }
+      return result;
+    }
+  }
+  return result;
+}
+// ──────────────────────────────────────────────────────────────────────────────
+//  Name cleanup
+// ──────────────────────────────────────────────────────────────────────────────
+function remasterOrCleanMethodString(originalName: string) {
+  return originalName
+    .replace(/^REQUEST_TYPE_/, "")
+    .replace(/^METHOD_/, "")
+    .replace(/^PLATFORM_/, "")
+    .replace(/^SOCIAL_ACTION_/, "")
+    .replace(/^GAME_ANTICHEAT_ACTION_/, "")
+    .replace(/^GAME_BACKGROUND_MODE_ACTION_/, "")
+    .replace(/^GAME_IAP_ACTION_/, "")
+    .replace(/^GAME_LOCATION_AWARENESS_ACTION_/, "")
+    .replace(/^GAME_ACCOUNT_REGISTRY_ACTION_/, "")
+    .replace(/^GAME_FITNESS_ACTION_/, "")
+    .replace(/^TITAN_PLAYER_SUBMISSION_ACTION_/, "");
+}
+// ──────────────────────────────────────────────────────────────────────────────
+//  Public API — now supports output shape
+// ──────────────────────────────────────────────────────────────────────────────
+export const decodePayloadTraffic = (
+  methodId: number,
+  contentBase64: any,
+  dataType: string,
+  outputShape: OutputShape = "full"
+): any[] => {
+  const parsedList: any[] = [];
+  const decoded = decodeProto(methodId, contentBase64, dataType, outputShape);
+  if (typeof decoded !== "string") parsedList.push(decoded);
+  return parsedList;
+};
+export const decodePayload = (
+  batchedContents: any,
+  dataType: string,
+  outputShape: OutputShape = "full"
+): any[] => {
+  const parsedList: any[] = [];
+  for (const protoEntry of batchedContents) {
+    const methodId = protoEntry.method;
+    const base64Data = protoEntry.data;
+    const decoded = decodeProto(methodId, base64Data, dataType, outputShape);
+    if (typeof decoded !== "string") parsedList.push(decoded);
+  }
+  return parsedList;
+};
+export const decodeProto = (
+  methodId: number,
+  base64Data: string,
+  dataType: string,
+  outputShape: OutputShape = "full"
+): DecodedProto | any | string => {
+  let returnValue: DecodedProto | any | string = "Not Found";
+  for (const [methodKeyName, methodTupleAny] of Object.entries(
+    requestMessagesResponses
+  )) {
+    const methodTuple = methodTupleAny as any; // [id, RequestType?, ResponseType?]
+    const tupleRequestOrResponseId = methodTuple[0];
+    if (tupleRequestOrResponseId !== methodId) continue;
+    // REQUEST branch
+    if (methodTuple[1] != null && dataType === "request") {
+      try {
+        let parsedData = decodeMessageToPlainObject(methodTuple[1], base64Data);
+        // Social wrapper: decode inner payload by action id for request
+        if (
+          tupleRequestOrResponseId === 5012 ||
+          tupleRequestOrResponseId === 600005
+        ) {
+          currentSocialActionMethodId = parsedData?.action ?? 0;
+          for (const [, innerTupleAny] of Object.entries(
+            requestMessagesResponses
+          )) {
+            const innerTuple = innerTupleAny as any;
+            const innerMethodId = innerTuple[0];
+            if (
+              innerMethodId === currentSocialActionMethodId &&
+              innerTuple[1] != null &&
+              typeof parsedData?.payload === "string" &&
+              parsedData.payload &&
+              b64Decode(parsedData.payload)?.length
+            ) {
+              parsedData.payload = decodeMessageToPlainObject(
+                innerTuple[1],
+                parsedData.payload
+              );
+            }
           }
         }
-        continue;
+        const fullResult: DecodedProto = {
+          methodId: tupleRequestOrResponseId,
+          methodName: remasterOrCleanMethodString(methodKeyName),
+          data: parsedData,
+        };
+        // Per-method JSON dumps: both parser & unparser write ONLY data (same timestamp)
+        const baseTimestampMs = Date.now();
+        writePerMethodJsonDump(
+          "parser",
+          fullResult.methodName,
+          baseTimestampMs,
+          "request",
+          fullResult.data
+        );
+        writePerMethodJsonDump(
+          "unparser",
+          fullResult.methodName,
+          baseTimestampMs,
+          "request",
+          fullResult.data
+        );
+        returnValue = outputShape === "data" ? fullResult.data : fullResult;
+        return returnValue;
+      } catch (error) {
+        console.error(`Error parsing request ${methodKeyName} -> ${error}`);
       }
-  
-      // repeated
-      if (f.repeated) {
-        if (Array.isArray(val) && rt && rt.fieldsArray) {
-          for (const item of val) addEnumZeroDefaults(item, rt);
+    } else if (dataType === "request") {
+      console.warn(`Request ${tupleRequestOrResponseId} Not Implemented`);
+    }
+    // RESPONSE branch
+    if (methodTuple[2] != null && dataType === "response") {
+      try {
+        let parsedData = decodeMessageToPlainObject(methodTuple[2], base64Data);
+        if (
+          (tupleRequestOrResponseId === 5012 ||
+            tupleRequestOrResponseId === 600005) &&
+          currentSocialActionMethodId > 0 &&
+          parsedData?.payload
+        ) {
+          parsedData.payload = DecoderInternalPayloadAsResponse(
+            currentSocialActionMethodId,
+            parsedData.payload
+          );
         }
-        continue;
+        const fullResult: DecodedProto = {
+          methodId: tupleRequestOrResponseId,
+          methodName: remasterOrCleanMethodString(methodKeyName),
+          data: parsedData,
+        };
+        // Per-method JSON dumps: both parser & unparser write ONLY data (same timestamp)
+        const baseTimestampMs = Date.now();
+        writePerMethodJsonDump(
+          "parser",
+          fullResult.methodName,
+          baseTimestampMs,
+          "response",
+          fullResult.data
+        );
+        writePerMethodJsonDump(
+          "unparser",
+          fullResult.methodName,
+          baseTimestampMs,
+          "response",
+          fullResult.data
+        );
+        returnValue = outputShape === "data" ? fullResult.data : fullResult;
+        return returnValue;
+      } catch (error) {
+        console.error(
+          `Error parsing response ${methodKeyName} method: [${tupleRequestOrResponseId}] -> ${error}`
+        );
       }
-  
-      // enum：缺失时补 0
-      if (rt && rt.values && val === undefined) {
-        obj[name] = 0;
-        continue;
-      }
-  
-      // 嵌套 message
-      if (rt && rt.fieldsArray && val && typeof val === "object") {
-        addEnumZeroDefaults(val, rt);
-      }
+    } else if (dataType === "response") {
+      console.warn(`Response ${tupleRequestOrResponseId} Not Implemented`);
     }
   }
-  
-
-// For decode dynamics action social.
-let action_social = 0;
-/**
- * Callback as used by {@link DecoderInternalPayloadAsResponse}.
- * @type {function}
- * @param {number|any}
- */
-/**
- * Returns decoded proto as JSON. Uses Tuples by https://github.com/Furtif/pogo-protos/blob/master/test/test.js, if that implemented.
- */
-function DecoderInternalPayloadAsResponse(method: number, data: any): any {
-    // Reset value.
-    action_social = 0;
-    let proto_tuple: any = Object.values(requestMessagesResponses)[method];
-    let result: any = { Not_Implemented_yet: data };
-    for (let i = 0; i < Object.keys(requestMessagesResponses).length; i++) {
-        proto_tuple = Object.values(requestMessagesResponses)[i];
-        const my_req = proto_tuple[0];
-        if (my_req == method) {
-            if (proto_tuple[2] != null && b64Decode(data)) {
-                try {
-                    // 原：proto_tuple[2].decode(b64Decode(data)).toJSON()
-                    result = decodeToPlain(proto_tuple[2], data);
-                    /*
-                    // This not need more because protos as replaced bytes for the proto.
-                    if (method == 10010) {
-                        let profile = POGOProtos.Rpc.PlayerPublicProfileProto.decode(b64Decode(result.friend[0].player.public_data)).toJSON();
-                        result.friend[0].player.public_data = profile;
-                    }
-                    */
-                }
-                catch (error) {
-                    console.error(`Intenal ProxySocial decoder ${my_req} Error: ${error}`);
-                    let err = {
-                        Error: error,
-                        Data: data
-                    };
-                    result = err;
-                }
-            }
-            return result;
-        }
-    }
-    return result;
-}
-
-function remasterOrCleanMethodString(str: string) {
-    return str.replace(/^REQUEST_TYPE_/, '')
-        .replace(/^METHOD_/, '')
-        .replace(/^PLATFORM_/, '')
-        .replace(/^SOCIAL_ACTION_/, '')
-        .replace(/^GAME_ANTICHEAT_ACTION_/, '')
-        .replace(/^GAME_BACKGROUND_MODE_ACTION_/, '')
-        .replace(/^GAME_IAP_ACTION_/, '')
-        .replace(/^GAME_LOCATION_AWARENESS_ACTION_/, '')
-        .replace(/^GAME_ACCOUNT_REGISTRY_ACTION_/, '')
-        .replace(/^GAME_FITNESS_ACTION_/, '')
-        .replace(/^TITAN_PLAYER_SUBMISSION_ACTION_/, '');
-}
-
-export const decodePayloadTraffic = (methodId: number, content: any, dataType: string): DecodedProto[] => {
-    let parsedProtoData: DecodedProto[] = [];
-    const decodedProto = decodeProto(methodId, content, dataType);
-    if (typeof decodedProto !== "string") {
-        parsedProtoData.push(decodedProto);
-    }
-    return parsedProtoData;
-};
-
-export const decodePayload = (contents: any, dataType: string): DecodedProto[] => {
-    let parsedProtoData: DecodedProto[] = [];
-    for (const proto of contents) {
-        const methodId = proto.method;
-        const data = proto.data;
-        const decodedProto = decodeProto(methodId, data, dataType);
-        if (typeof decodedProto !== "string") {
-            parsedProtoData.push(decodedProto);
-        }
-    }
-    return parsedProtoData;
-};
-
-export const decodeProto = (method: number, data: string, dataType: string): DecodedProto | string => {
-    let returnObject: DecodedProto | string = "Not Found";
-    for (let i = 0; i < Object.keys(requestMessagesResponses).length; i++) {
-        let foundMethod: any = Object.values(requestMessagesResponses)[i];
-        let foundMethodString: string = Object.keys(requestMessagesResponses)[i];
-        const foundReq = foundMethod[0];
-        if (foundReq == method) {
-            if (foundMethod[1] != null && dataType === "request") {
-                try {
-                    // 原：foundMethod[1].decode(b64Decode(data)).toJSON()
-                    let parsedData = decodeToPlain(foundMethod[1], data);
-                    if (foundMethod[0] === 5012 || foundMethod[0] === 600005) {
-                        action_social = parsedData.action;
-                        Object.values(requestMessagesResponses).forEach(val => {
-                            let req: any = val;
-                            if (req[0] == action_social && req[1] != null && parsedData.payload && b64Decode(parsedData.payload)) {
-                                // 原：req[1].decode(b64Decode(parsedData.payload)).toJSON()
-                                parsedData.payload = decodeToPlain(req[1], parsedData.payload);
-                            }
-                        });
-                    }
-                    returnObject = {
-                        methodId: foundMethod[0],
-                        methodName: remasterOrCleanMethodString(foundMethodString),
-                        data: parsedData,
-                    };
-                } catch (error) {
-                    console.error(`Error parsing request ${foundMethodString} -> ${error}`);
-                }
-            } else if (dataType === "request") {
-                console.warn(`Request ${foundMethod[0]} Not Implemented`)
-            }
-            if (foundMethod[2] != null && dataType === "response") {
-                try {
-                    // 原：foundMethod[2].decode(b64Decode(data)).toJSON()
-                    let parsedData = decodeToPlain(foundMethod[2], data);
-                    if (foundMethod[0] === 5012 && action_social > 0 && parsedData.payload) {
-                        parsedData.payload = DecoderInternalPayloadAsResponse(action_social, parsedData.payload);
-                    }
-                    else if (foundMethod[0] === 600005 && action_social > 0 && parsedData.payload) {
-                        parsedData.payload = DecoderInternalPayloadAsResponse(action_social, parsedData.payload);
-                    }
-                    returnObject = {
-                        methodId: foundMethod[0],
-                        methodName: remasterOrCleanMethodString(foundMethodString),
-                        data: parsedData,
-                    };
-                } catch (error) {
-                    console.error(`Error parsing response ${foundMethodString} method: [${foundReq}] -> ${error}`);
-                }
-            } else if (dataType === "response") {
-                console.warn(`Response ${foundReq} Not Implemented`)
-            }
-        }
-    }
-    return returnObject;
+  return returnValue;
 };
