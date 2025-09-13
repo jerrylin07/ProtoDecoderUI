@@ -116,7 +116,13 @@ function DecoderInternalPayloadAsResponse(
             console.error(
               `Internal ProxySocial decoder (number enums) ${methodId} Error: ${error}`
             );
-            return { Error: error, Data: base64Data };
+            try {
+              return decodeMessageToStringEnums(methodTuple[2], base64Data);
+            } catch (error2) {
+              console.error(
+                `Internal ProxySocial decoder (string enums) ${methodId} Error: ${error2}`
+              );
+            }
           }
         }
       }
@@ -137,12 +143,22 @@ function DecoderInternalPayloadAsResponseStringEnums(
         const buf = b64Decode(base64Data);
         if (buf && buf.length) {
           try {
-            return decodeMessageToStringEnums(methodTuple[2], base64Data);
+            // 优先数字枚举：更稳，不容易把 bytes 污染成大段字符串
+            return decodeMessageToPlainObject(methodTuple[2], base64Data);
           } catch (error) {
             console.error(
-              `Internal ProxySocial decoder (string enums) ${methodId} Error: ${error}`
+              `Internal ProxySocial decoder (number enums) ${methodId} Error:`,
+              error
             );
-            return { Error: error, Data: base64Data };
+            try {
+              // 回退到字符串枚举
+              return decodeMessageToStringEnums(methodTuple[2], base64Data);
+            } catch (error2) {
+              console.error(
+                `Internal ProxySocial decoder (string enums) ${methodId} Error:`,
+                error2
+              );
+            }
           }
         }
       }
@@ -307,10 +323,19 @@ export const decodeProtoStringEnums = (
               typeof parsedData?.payload === "string" &&
               b64Decode(parsedData.payload)?.length
             ) {
-              parsedData.payload = decodeMessageToStringEnums(
+              let innerDecoded: any = decodeMessageToPlainObject(
                 inner[1],
                 parsedData.payload
               );
+              if (!innerDecoded) {
+                innerDecoded = decodeMessageToStringEnums(
+                  inner[1],
+                  parsedData.payload
+                );
+              }
+              if (innerDecoded) {
+                parsedData.payload = innerDecoded;
+              }
             }
           }
         }
@@ -419,10 +444,19 @@ export const decodeProto = (
               typeof parsedData?.payload === "string" &&
               b64Decode(parsedData.payload)?.length
             ) {
-              parsedData.payload = decodeMessageToPlainObject(
+              let innerDecoded: any = decodeMessageToPlainObject(
                 inner[1],
                 parsedData.payload
               );
+              if (!innerDecoded) {
+                innerDecoded = decodeMessageToStringEnums(
+                  inner[1],
+                  parsedData.payload
+                );
+              }
+              if (innerDecoded) {
+                parsedData.payload = innerDecoded;
+              }
             }
           }
         }

@@ -1,6 +1,5 @@
 import fs from "fs";
 import path from "path";
-const writeRaw = process.env.DUMP_RAW === "1";
 
 /** 尽量只去掉控制字符，保留可见字符（含日文等）。*/
 function stripControlCharactersKeepVisible(input: string): string {
@@ -36,6 +35,7 @@ function sanitizeBinaryishStringsDeep(target: any): void {
     }
   }
 }
+
 export type Direction = "request" | "response";
 // ──────────────────────────────────────────────────────────────────────────────
 // Time & filesystem helpers (no abbreviations in names)
@@ -120,35 +120,21 @@ export function dumpParserAndUnparserData(args: DumpArguments): DumpResult {
   // Both files write ONLY the corresponding data object
   {
     const __sanitized = JSON.parse(JSON.stringify(args.parserData));
-    {
-      const sanitizedParser = JSON.parse(JSON.stringify(args.parserData));
-      sanitizeBinaryishStringsDeep(sanitizedParser);
-      fs.writeFileSync(
-        parserFilePath,
-        JSON.stringify(sanitizedParser, null, 2),
-        "utf8"
-      );
-    }
+    sanitizeBinaryishStringsDeep(__sanitized);
+    fs.writeFileSync(
+      parserFilePath,
+      JSON.stringify(__sanitized, null, 2),
+      "utf8"
+    );
   }
   {
     const __sanitized = JSON.parse(JSON.stringify(args.unparserData));
     sanitizeBinaryishStringsDeep(__sanitized);
-    {
-      const sanitizedUnparser = JSON.parse(JSON.stringify(args.unparserData));
-      sanitizeBinaryishStringsDeep(sanitizedUnparser);
-      fs.writeFileSync(
-        unparserFilePath,
-        JSON.stringify(sanitizedUnparser, null, 2),
-        "utf8"
-      );
-    }
-    if (writeRaw) {
-      const rawParserPath = parserFilePath.replace(/\.json$/, ".raw.json");
-      const rawUnparserPath = unparserFilePath.replace(/\.json$/, ".raw.json");
-      fs.writeFileSync(rawParserPath, JSON.stringify(args.parserData, null, 2), "utf8");
-      fs.writeFileSync(rawUnparserPath, JSON.stringify(args.unparserData, null, 2), "utf8");
-    }
-    
+    fs.writeFileSync(
+      unparserFilePath,
+      JSON.stringify(__sanitized, null, 2),
+      "utf8"
+    );
   }
   return {
     baseTimestampMilliseconds,
