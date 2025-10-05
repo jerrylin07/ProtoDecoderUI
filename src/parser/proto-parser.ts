@@ -6,6 +6,27 @@ import { DecodedProto } from "../types";
 export type OutputShape = "full" | "data";
 /** 跟踪社交动作（5012 / 600005）以便响应侧解 payload。保持与原版一致的全局做法。 */
 let currentSocialActionMethodId = 0;
+/** Choose message type by direction; fallback to the other side if the preferred fails. */
+function decodeWithType<T>(
+  tuple: any[],
+  preferIndex: 1 | 2,
+  base64: string,
+  fn: (protoType: any, b64: string) => T
+): T | null {
+  const first = tuple?.[preferIndex];
+  const second = tuple?.[preferIndex === 1 ? 2 : 1];
+  if (first) {
+    try {
+      return fn(first, base64);
+    } catch {}
+  }
+  if (second) {
+    try {
+      return fn(second, base64);
+    } catch {}
+  }
+  return null;
+}
 let pendingPairTimestamp: { methodId: number; timestampMs: number } | null =
   null;
 /* ────────────────────────────────────────────────────────────────────────────
@@ -111,18 +132,17 @@ function DecoderInternalPayloadAsResponse(
         const buf = b64Decode(base64Data);
         if (buf && buf.length) {
           try {
-            return decodeMessageToPlainObject(methodTuple[2], base64Data);
+            return decodeWithType(
+              methodTuple,
+              2,
+              base64Data,
+              decodeMessageToPlainObject
+            );
           } catch (error) {
             console.error(
               `Internal ProxySocial decoder (number enums) ${methodId} Error: ${error}`
             );
-            try {
-              return decodeMessageToStringEnums(methodTuple[2], base64Data);
-            } catch (error2) {
-              console.error(
-                `Internal ProxySocial decoder (string enums) ${methodId} Error: ${error2}`
-              );
-            }
+            return { Error: error, Data: base64Data };
           }
         }
       }
@@ -143,22 +163,17 @@ function DecoderInternalPayloadAsResponseStringEnums(
         const buf = b64Decode(base64Data);
         if (buf && buf.length) {
           try {
-            // 优先数字枚举：更稳，不容易把 bytes 污染成大段字符串
-            return decodeMessageToPlainObject(methodTuple[2], base64Data);
+            return decodeWithType(
+              methodTuple,
+              2,
+              base64Data,
+              decodeMessageToStringEnums
+            );
           } catch (error) {
             console.error(
-              `Internal ProxySocial decoder (number enums) ${methodId} Error:`,
-              error
+              `Internal ProxySocial decoder (string enums) ${methodId} Error: ${error}`
             );
-            try {
-              // 回退到字符串枚举
-              return decodeMessageToStringEnums(methodTuple[2], base64Data);
-            } catch (error2) {
-              console.error(
-                `Internal ProxySocial decoder (string enums) ${methodId} Error:`,
-                error2
-              );
-            }
+            return { Error: error, Data: base64Data };
           }
         }
       }
@@ -311,7 +326,13 @@ export const decodeProtoStringEnums = (
     // REQUEST（字符串枚举）
     if (methodTuple[1] && dataType === "request") {
       try {
-        let parsedData = decodeMessageToStringEnums(methodTuple[1], base64Data);
+        let parsedData =
+          decodeWithType(
+            methodTuple,
+            1,
+            base64Data,
+            decodeMessageToStringEnums
+          ) ?? {};
         // social wrapper
         if (tupleId === 5012 || tupleId === 600005) {
           currentSocialActionMethodId = parsedData?.action ?? 0;
@@ -323,19 +344,13 @@ export const decodeProtoStringEnums = (
               typeof parsedData?.payload === "string" &&
               b64Decode(parsedData.payload)?.length
             ) {
-              let innerDecoded: any = decodeMessageToPlainObject(
-                inner[1],
-                parsedData.payload
-              );
-              if (!innerDecoded) {
-                innerDecoded = decodeMessageToStringEnums(
-                  inner[1],
-                  parsedData.payload
-                );
-              }
-              if (innerDecoded) {
-                parsedData.payload = innerDecoded;
-              }
+              parsedData.payload =
+                decodeWithType(
+                  inner,
+                  1,
+                  parsedData.payload,
+                  decodeMessageToStringEnums
+                ) ?? parsedData.payload;
             }
           }
         }
@@ -370,7 +385,13 @@ export const decodeProtoStringEnums = (
     // RESPONSE（字符串枚举）
     if (methodTuple[2] && dataType === "response") {
       try {
-        let parsedData = decodeMessageToStringEnums(methodTuple[2], base64Data);
+        let parsedData =
+          decodeWithType(
+            methodTuple,
+            2,
+            base64Data,
+            decodeMessageToStringEnums
+          ) ?? {};
         if (
           (tupleId === 5012 || tupleId === 600005) &&
           currentSocialActionMethodId > 0 &&
@@ -433,7 +454,13 @@ export const decodeProto = (
     // REQUEST（数字枚举）
     if (methodTuple[1] && dataType === "request") {
       try {
-        let parsedData = decodeMessageToPlainObject(methodTuple[1], base64Data);
+        let parsedData =
+          decodeWithType(
+            methodTuple,
+            1,
+            base64Data,
+            decodeMessageToPlainObject
+          ) ?? {};
         if (tupleId === 5012 || tupleId === 600005) {
           currentSocialActionMethodId = parsedData?.action ?? 0;
           for (const [, innerAny] of Object.entries(requestMessagesResponses)) {
@@ -444,19 +471,13 @@ export const decodeProto = (
               typeof parsedData?.payload === "string" &&
               b64Decode(parsedData.payload)?.length
             ) {
-              let innerDecoded: any = decodeMessageToPlainObject(
-                inner[1],
-                parsedData.payload
-              );
-              if (!innerDecoded) {
-                innerDecoded = decodeMessageToStringEnums(
-                  inner[1],
-                  parsedData.payload
-                );
-              }
-              if (innerDecoded) {
-                parsedData.payload = innerDecoded;
-              }
+              parsedData.payload =
+                decodeWithType(
+                  inner,
+                  1,
+                  parsedData.payload,
+                  decodeMessageToPlainObject
+                ) ?? parsedData.payload;
             }
           }
         }
@@ -478,7 +499,13 @@ export const decodeProto = (
     // RESPONSE（数字枚举）
     if (methodTuple[2] && dataType === "response") {
       try {
-        let parsedData = decodeMessageToPlainObject(methodTuple[2], base64Data);
+        let parsedData =
+          decodeWithType(
+            methodTuple,
+            2,
+            base64Data,
+            decodeMessageToPlainObject
+          ) ?? {};
         if (
           (tupleId === 5012 || tupleId === 600005) &&
           currentSocialActionMethodId > 0 &&

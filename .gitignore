@@ -7,3 +7,4 @@ dist
 /.idea/
 /dumps
 src/parser/test.ts
+/_clean_samples

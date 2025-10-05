@@ -1,155 +1,85 @@
 import fs from "fs";
 import path from "path";
-const writeRaw = process.env.DUMP_RAW === "1";
+import { formatUtcTimestampCompact } from "./date-utils";
+import { sanitizeFileName, ensureDirectory } from "./fs-utils";
+import { sanitizeBinaryishStringsDeep } from "./sanitize-utils";
 
-/** 尽量只去掉控制字符，保留可见字符（含日文等）。*/
-function stripControlCharactersKeepVisible(input: string): string {
-  return typeof input === "string"
-    ? input.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]+/g, "")
-    : (input as any);
+/* ========== 本文件内自包含的小工具，确保运行期有实现 ========== */
+
+/** 深拷贝 + 清理 */
+function sanitizeAndClone<T>(input: T): T {
+  const clone: any = JSON.parse(JSON.stringify(input));
+  sanitizeBinaryishStringsDeep(clone);
+  return clone as T;
 }
 
-/** 自底向上清理对象里的“脏字符串”；对 stamp_color 额外抽 #RRGGBB。*/
-function sanitizeBinaryishStringsDeep(target: any): void {
-  if (target == null) return;
-  if (Array.isArray(target)) {
-    target.forEach(sanitizeBinaryishStringsDeep);
-    return;
-  }
-  if (typeof target !== "object") return;
+/** 通过环境变量控制是否额外输出 raw（未清洗）文件 */
+const writeRaw: boolean = process.env.DUMP_RAW === "1";
 
-  for (const key of Object.keys(target)) {
-    const value = (target as any)[key];
-    if (typeof value === "string") {
-      if (key === "stamp_color") {
-        const hex = value.match(/#[0-9A-Fa-f]{6}/);
-        if (hex) {
-          (target as any)[key] = hex[0];
-          continue;
-        }
-      }
-      (target as any)[key] = stripControlCharactersKeepVisible(value);
-    } else if (Array.isArray(value)) {
-      value.forEach(sanitizeBinaryishStringsDeep);
-    } else if (value && typeof value === "object") {
-      sanitizeBinaryishStringsDeep(value);
-    }
-  }
-}
-export type Direction = "request" | "response";
-// ──────────────────────────────────────────────────────────────────────────────
-// Time & filesystem helpers (no abbreviations in names)
-// ──────────────────────────────────────────────────────────────────────────────
-const padTwoDigits = (value: number) => String(value).padStart(2, "0");
-const padThreeDigits = (value: number) => String(value).padStart(3, "0");
-/**
- * Format milliseconds since epoch to a compact UTC timestamp.
- * Example: 2025-08-24 20:30:54.500Z → "20250824T203054500"
- */
-export function formatUtcTimestampCompact(milliseconds: number): string {
-  const date = new Date(milliseconds);
-  return (
-    date.getUTCFullYear().toString() +
-    padTwoDigits(date.getUTCMonth() + 1) +
-    padTwoDigits(date.getUTCDate()) +
-    "T" +
-    padTwoDigits(date.getUTCHours()) +
-    padTwoDigits(date.getUTCMinutes()) +
-    padTwoDigits(date.getUTCSeconds()) +
-    padThreeDigits(date.getUTCMilliseconds())
-  );
-}
-/** Sanitize method names for safe filenames. */
-export function sanitizeFileName(input?: string): string {
-  return (input ?? "")
-    .trim()
-    .replace(/\s+/g, "_")
-    .replace(/[^A-Za-z0-9._-]/g, "");
-}
-/** Ensure a directory exists (create recursively if needed). */
-export function ensureDirectory(directoryPath: string): void {
-  fs.mkdirSync(directoryPath, { recursive: true });
-}
-// ──────────────────────────────────────────────────────────────────────────────
-// Dumper interfaces & implementation
-// ──────────────────────────────────────────────────────────────────────────────
+/* ========== 对外导出的 API ========== */
+
 export interface DumpArguments {
-  /** e.g., "GET_QUEST_DETAILS" */
-  methodName: string;
-  /** "request" | "response" */
-  direction: Direction;
-  /** Data to write for the parser variant (should be the `data` object only). */
-  parserData: any;
-  /** Data to write for the unparser variant (should be the `data` object only). */
-  unparserData: any;
-  /** Optional shared timestamp in milliseconds. If omitted, Date.now() is used. */
-  baseTimestampMilliseconds?: number;
-  /** Root directory for dumps (default: ./dumps). */
   rootDirectory?: string;
+  baseTimestampMilliseconds?: number;
+  methodName?: string;
+  direction: "request" | "response" | string;
+  parserData: any;
+  unparserData: any;
 }
 export interface DumpResult {
   baseTimestampMilliseconds: number;
   parserFilePath: string;
   unparserFilePath: string;
 }
-/**
- * Write two JSON files (parser & unparser) for a single decoded method call.
- * Both files:
- *  - use the same compact UTC timestamp in the filename (millisecond precision)
- *  - contain ONLY the `data` object (no methodId/methodName wrapper)
- *  - are separated into subfolders: dumps/parser and dumps/unparser
- *
- * Filename pattern:
- *   <methodName>_<YYYYMMDDTHHMMSSmmm>_<request|response>.json
- */
+
 export function dumpParserAndUnparserData(args: DumpArguments): DumpResult {
   const rootDirectory =
     args.rootDirectory ?? path.resolve(process.cwd(), "dumps");
   const baseTimestampMilliseconds =
     args.baseTimestampMilliseconds ?? Date.now();
   const timestampString = formatUtcTimestampCompact(baseTimestampMilliseconds);
-  const safeMethodName = sanitizeFileName(args.methodName || "METHOD_unknown");
+  const safeMethodName = sanitizeFileName(args.methodName ?? "METHOD_unknown");
+
   const parserDirectoryPath = path.join(rootDirectory, "parser");
   const unparserDirectoryPath = path.join(rootDirectory, "unparser");
   ensureDirectory(parserDirectoryPath);
   ensureDirectory(unparserDirectoryPath);
-  const parserFileName = `${safeMethodName}_${timestampString}_${args.direction}.json`;
-  const unparserFileName = `${safeMethodName}_${timestampString}_${args.direction}.json`;
-  const parserFilePath = path.join(parserDirectoryPath, parserFileName);
-  const unparserFilePath = path.join(unparserDirectoryPath, unparserFileName);
-  // Both files write ONLY the corresponding data object
-  {
-    const __sanitized = JSON.parse(JSON.stringify(args.parserData));
-    {
-      const sanitizedParser = JSON.parse(JSON.stringify(args.parserData));
-      sanitizeBinaryishStringsDeep(sanitizedParser);
-      fs.writeFileSync(
-        parserFilePath,
-        JSON.stringify(sanitizedParser, null, 2),
-        "utf8"
-      );
-    }
+
+  const fileName = `${safeMethodName}_${timestampString}_${args.direction}.json`;
+  const parserFilePath = path.join(parserDirectoryPath, fileName);
+  const unparserFilePath = path.join(unparserDirectoryPath, fileName);
+
+  // （可选）输出 raw 版本，便于对比清洗前/后
+  if (writeRaw) {
+    const rawParserPath = parserFilePath.replace(/\.json$/, ".raw.json");
+    const rawUnparserPath = unparserFilePath.replace(/\.json$/, ".raw.json");
+    fs.writeFileSync(
+      rawParserPath,
+      JSON.stringify(args.parserData, null, 2),
+      "utf8"
+    );
+    fs.writeFileSync(
+      rawUnparserPath,
+      JSON.stringify(args.unparserData, null, 2),
+      "utf8"
+    );
   }
-  {
-    const __sanitized = JSON.parse(JSON.stringify(args.unparserData));
-    sanitizeBinaryishStringsDeep(__sanitized);
-    {
-      const sanitizedUnparser = JSON.parse(JSON.stringify(args.unparserData));
-      sanitizeBinaryishStringsDeep(sanitizedUnparser);
-      fs.writeFileSync(
-        unparserFilePath,
-        JSON.stringify(sanitizedUnparser, null, 2),
-        "utf8"
-      );
-    }
-    if (writeRaw) {
-      const rawParserPath = parserFilePath.replace(/\.json$/, ".raw.json");
-      const rawUnparserPath = unparserFilePath.replace(/\.json$/, ".raw.json");
-      fs.writeFileSync(rawParserPath, JSON.stringify(args.parserData, null, 2), "utf8");
-      fs.writeFileSync(rawUnparserPath, JSON.stringify(args.unparserData, null, 2), "utf8");
-    }
-    
-  }
+
+  // 清洗后写入正式文件
+  const sanitizedParser = sanitizeAndClone(args.parserData);
+  fs.writeFileSync(
+    parserFilePath,
+    JSON.stringify(sanitizedParser, null, 2),
+    "utf8"
+  );
+
+  const sanitizedUnparser = sanitizeAndClone(args.unparserData);
+  fs.writeFileSync(
+    unparserFilePath,
+    JSON.stringify(sanitizedUnparser, null, 2),
+    "utf8"
+  );
+
   return {
     baseTimestampMilliseconds,
     parserFilePath,
