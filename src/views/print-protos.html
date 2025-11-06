@@ -59,20 +59,26 @@
                   />
                   <label for="instance-filter-dropdown">Found Instances:</label>
                   <select id="instance-filter-dropdown">
-                    <option value=""></option>
+                    <option value="">All Instances</option>
                   </select>
                 </div>
               </div>
               <div class="row">
                 <div class="col-sm-10">
-                  <label for="blacklist-ids-incoming" style="width: 80px"
-                    >Blacklist Methods</label
+                  <div style="display: inline-block; margin-right: 10px;">
+                    <select id="filter-mode" style="padding: 3px;">
+                      <option value="blacklist">Blacklist</option>
+                      <option value="whitelist">Whitelist</option>
+                    </select>
+                  </div>
+                  <label for="method-filter-ids" id="filter-label" style="width: 80px"
+                    >Methods</label
                   >
                   <input
                     type="text"
-                    id="blacklist-ids-incoming"
+                    id="method-filter-ids"
                     placeholder="5026,1601,1103,..."
-                    style="width: calc(100% - 83px)"
+                    style="width: calc(100% - 200px)"
                   />
                 </div>
                 <div class="col-sm-2">
@@ -90,11 +96,14 @@
               >
                 <thead>
                   <tr>
-                    <th>Instance</th>
+                    <th class="mobile-hide">Instance</th>
                     <th>Method</th>
                     <th>Method Name</th>
-                    <th>Sended Data</th>
-                    <th>Received Data</th>
+                    <th class="mobile-hide">Sended Data</th>
+                    <th class="mobile-hide">Received Data</th>
+                    <th class="mobile-only">Req</th>
+                    <th class="mobile-only">Res</th>
+                    <th class="mobile-only">DL</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -126,12 +135,33 @@
           </div>
           <div class="modal-body">
             <p>Method name: <span class="method-name"></span></p>
-            <p>Incoming data:</p>
-            <pre class="method-data-incoming"></pre>
-            <p>Outgoing data:</p>
-            <pre class="method-data-outgoing"></pre>
+            <p>Request data (Sent to server): <small style="color: #666;">(Click to copy)</small></p>
+            <pre class="method-data-incoming clickable-data" style="cursor: pointer; position: relative;"></pre>
+            <p>Response data (Received from server): <small style="color: #666;">(Click to copy)</small></p>
+            <pre class="method-data-outgoing clickable-data" style="cursor: pointer; position: relative;"></pre>
           </div>
           <div class="modal-footer">
+            <button
+              type="button"
+              class="btn btn-primary"
+              id="download-incoming-json"
+            >
+              <i class="fas fa-download"></i> Download Request
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary"
+              id="download-outgoing-json"
+            >
+              <i class="fas fa-download"></i> Download Response
+            </button>
+            <button
+              type="button"
+              class="btn btn-success"
+              id="download-combined-json"
+            >
+              <i class="fas fa-download"></i> Download Both
+            </button>
             <button
               type="button"
               class="btn btn-secondary"
@@ -164,6 +194,7 @@
           this.methodId = obj.methodId;
           this.methodName = obj.methodName;
           this.responseHtmlElement = null;
+          this.responseStatusElement = null;
           this.response = null;
         }
         setResponse(obj) {
@@ -182,7 +213,42 @@
       let messages = [];
       let foundInstances = [];
       let instanceFilter = "";
-      let incomingBlacklistIds = [];
+      let methodFilterIds = [];
+      let filterMode = "blacklist";
+
+      function downloadJSON(data, filename) {
+        const jsonStr = JSON.stringify(data, null, 2);
+        const blob = new Blob([jsonStr], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function showToast(message, isError = false) {
+        const bgColor = isError ? '#dc3545' : '#28a745';
+        const toast = $(`<div style="position: fixed; bottom: 20px; right: 20px; background: ${bgColor}; color: white; padding: 12px 20px; border-radius: 5px; font-size: 14px; z-index: 9999; box-shadow: 0 2px 10px rgba(0,0,0,0.2);">${message}</div>`);
+        $('body').append(toast);
+        toast.hide().fadeIn(300);
+        setTimeout(function() {
+          toast.fadeOut(300, function() {
+            toast.remove();
+          });
+        }, 2000);
+      }
+
+      function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(function() {
+          showToast('Copied to clipboard!');
+        }).catch(function(err) {
+          console.error('Failed to copy: ', err);
+          showToast('Failed to copy to clipboard', true);
+        });
+      }
       incoming.on("protos", function (data) {
         if (foundInstances.indexOf(data.identifier) === -1) {
           foundInstances.push(data.identifier);
@@ -191,11 +257,16 @@
         if (STATE !== 1) {
           return;
         }
-        if (instanceFilter == "" || data.identifier !== instanceFilter) {
+        if (instanceFilter !== "" && data.identifier !== instanceFilter) {
           return;
         }
-        if (incomingBlacklistIds.length > 0) {
-          if (incomingBlacklistIds.indexOf(data.methodId) !== -1) {
+        if (methodFilterIds.length > 0) {
+          const methodIdNum = parseInt(data.methodId);
+          const isInList = methodFilterIds.indexOf(methodIdNum) !== -1;
+          if (filterMode === "blacklist" && isInList) {
+            return;
+          }
+          if (filterMode === "whitelist" && !isInList) {
             return;
           }
         }
@@ -207,25 +278,72 @@
           messages.push(message);
           const tr = document.createElement("tr");
           tr.setAttribute("id", message.id);
-          const parameters = [
-            "identifier",
-            "methodId",
-            "methodName",
-            "data",
-            null,
-          ];
-          parameters.forEach((el) => {
-            const td = document.createElement("td");
-            if (el != null) {
-              if (el == "data") td.innerHTML = objectToReadable(message[el]);
-              else td.innerText = message[el];
-              if (el == "methodId") td.classList.add("important");
-            } else {
-              td.innerText = "Waiting data...";
-              message.responseHtmlElement = td;
-            }
-            tr.appendChild(td);
-          });
+
+          const tdInstance = document.createElement("td");
+          tdInstance.classList.add("mobile-hide");
+          tdInstance.innerText = message.identifier;
+          tr.appendChild(tdInstance);
+
+          const tdMethodId = document.createElement("td");
+          tdMethodId.innerText = message.methodId;
+          tdMethodId.classList.add("important");
+          tr.appendChild(tdMethodId);
+
+          const tdMethodName = document.createElement("td");
+          tdMethodName.innerText = message.methodName;
+          tr.appendChild(tdMethodName);
+
+          const tdData = document.createElement("td");
+          tdData.classList.add("mobile-hide");
+          tdData.innerHTML = objectToReadable(message.data);
+          tr.appendChild(tdData);
+
+          const tdResponse = document.createElement("td");
+          tdResponse.classList.add("mobile-hide");
+          tdResponse.innerText = "Waiting data...";
+          message.responseHtmlElement = tdResponse;
+          tr.appendChild(tdResponse);
+
+          const tdReqStatus = document.createElement("td");
+          tdReqStatus.classList.add("mobile-only", "text-center");
+          const reqCopyBtn = document.createElement("button");
+          reqCopyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+          reqCopyBtn.style.cssText = "padding: 4px; font-size: 14px; border: none; background: transparent; color: #007bff; cursor: pointer;";
+          reqCopyBtn.onclick = function(e) {
+            e.stopPropagation();
+            const jsonStr = JSON.stringify(message.data, null, 2);
+            copyToClipboard(jsonStr);
+          };
+          tdReqStatus.appendChild(reqCopyBtn);
+          tr.appendChild(tdReqStatus);
+
+          const tdResStatus = document.createElement("td");
+          tdResStatus.classList.add("mobile-only", "text-center");
+          tdResStatus.innerHTML = '<span style="color: red;">✗</span>';
+          message.responseStatusElement = tdResStatus;
+          tr.appendChild(tdResStatus);
+
+          const tdDownload = document.createElement("td");
+          tdDownload.classList.add("mobile-only", "text-center");
+          const downloadBtn = document.createElement("button");
+          downloadBtn.innerHTML = '<i class="fas fa-download"></i>';
+          downloadBtn.style.cssText = "padding: 4px; font-size: 14px; border: none; background: transparent; color: #28a745; cursor: pointer;";
+          downloadBtn.onclick = function(e) {
+            e.stopPropagation(); // Prevent row click
+            const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+            const filename = `combined_${message.methodName}_${message.methodId}_${timestamp}.json`;
+            const combinedData = {
+              identifier: message.identifier,
+              methodId: message.methodId,
+              methodName: message.methodName,
+              request: message.data,
+              response: message.response ? message.response.data : null
+            };
+            downloadJSON(combinedData, filename);
+          };
+          tdDownload.appendChild(downloadBtn);
+          tr.appendChild(tdDownload);
+
           $("#data_socket tbody").prepend(tr);
           if ($("#data_socket tbody").children().length > maxLogs)
             $("#data_socket tbody").children().last().remove();
@@ -239,12 +357,17 @@
         if (STATE !== 1) {
           return;
         }
-        if (incomingBlacklistIds.length > 0) {
-          if (incomingBlacklistIds.indexOf(data.methodId) !== -1) {
+        if (methodFilterIds.length > 0) {
+          const methodIdNum = parseInt(data.methodId);
+          const isInList = methodFilterIds.indexOf(methodIdNum) !== -1;
+          if (filterMode === "blacklist" && isInList) {
+            return;
+          }
+          if (filterMode === "whitelist" && !isInList) {
             return;
           }
         }
-        if (instanceFilter == "" || data.identifier !== instanceFilter) {
+        if (instanceFilter !== "" && data.identifier !== instanceFilter) {
           return;
         }
         if (typeof data.error !== "undefined") {
@@ -262,11 +385,25 @@
           incomingMessage.responseHtmlElement.innerHTML = objectToReadable(
             data.data
           );
+          if (incomingMessage.responseStatusElement) {
+            incomingMessage.responseStatusElement.innerHTML = '';
+            const resCopyBtn = document.createElement("button");
+            resCopyBtn.innerHTML = '<i class="fas fa-copy"></i>';
+            resCopyBtn.style.cssText = "padding: 4px; font-size: 14px; border: none; background: transparent; color: #007bff; cursor: pointer;";
+            resCopyBtn.onclick = function(e) {
+              e.stopPropagation();
+              const jsonStr = JSON.stringify(data.data, null, 2);
+              copyToClipboard(jsonStr);
+            };
+            incomingMessage.responseStatusElement.appendChild(resCopyBtn);
+          }
         }
       });
+      let currentModalMessage = null;
       $("#data_socket tbody").on("click", "tr", function () {
         const message = messages.filter((msg) => msg.id == $(this)[0].id)[0];
         if (message == null) return;
+        currentModalMessage = message;
         $("#modal-detail").find(".method-id").html(message.methodId);
         $("#modal-detail").find(".method-name").html(message.methodName);
         $("#modal-detail")
@@ -277,6 +414,48 @@
           .jsonViewer(message.response.data);
         $("#modal-detail").modal();
       });
+      $("#download-incoming-json").click(function () {
+        if (!currentModalMessage) return;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `request_${currentModalMessage.methodName}_${currentModalMessage.methodId}_${timestamp}.json`;
+        downloadJSON(currentModalMessage.data, filename);
+      });
+
+      $("#download-outgoing-json").click(function () {
+        if (!currentModalMessage || !currentModalMessage.response) return;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `response_${currentModalMessage.methodName}_${currentModalMessage.methodId}_${timestamp}.json`;
+        downloadJSON(currentModalMessage.response.data, filename);
+      });
+
+      $("#download-combined-json").click(function () {
+        if (!currentModalMessage) return;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const filename = `combined_${currentModalMessage.methodName}_${currentModalMessage.methodId}_${timestamp}.json`;
+        const combinedData = {
+          identifier: currentModalMessage.identifier,
+          methodId: currentModalMessage.methodId,
+          methodName: currentModalMessage.methodName,
+          request: currentModalMessage.data,
+          response: currentModalMessage.response ? currentModalMessage.response.data : null
+        };
+        downloadJSON(combinedData, filename);
+      });
+
+      $(document).on('click', '.method-data-incoming', function(e) {
+        if (currentModalMessage && currentModalMessage.data) {
+          const jsonStr = JSON.stringify(currentModalMessage.data, null, 2);
+          copyToClipboard(jsonStr);
+        }
+      });
+
+      $(document).on('click', '.method-data-outgoing', function(e) {
+        if (currentModalMessage && currentModalMessage.response && currentModalMessage.response.data) {
+          const jsonStr = JSON.stringify(currentModalMessage.response.data, null, 2);
+          copyToClipboard(jsonStr);
+        }
+      });
+
       $("#darkmode-button").click(function () {
         if (document.body.classList.contains("dark")) {
           document.body.classList.remove("dark");
@@ -392,14 +571,20 @@
         instanceFilter = $(this).val();
         storeSettings();
       });
-      $("#blacklist-ids-incoming").keyup(function () {
-        incomingBlacklistIds =
+      $("#method-filter-ids").keyup(function () {
+        methodFilterIds =
           $(this).val() === ""
             ? []
             : $(this)
                 .val()
                 .split(",")
                 .map((x) => parseInt(x));
+        storeSettings();
+      });
+
+      $("#filter-mode").change(function () {
+        filterMode = $(this).val();
+        clearTable();
         storeSettings();
       });
       $("#maxlogs").on("change", function () {
@@ -418,8 +603,16 @@
         if (settingsJson !== null) {
           const settings = JSON.parse(settingsJson);
           (STATE = parseInt(settings["STATE"])),
-            (instanceFilter = settings["instanceFilter"]),
-            (incomingBlacklistIds = settings["incomingBlacklistIds"]);
+            (instanceFilter = settings["instanceFilter"]);
+          // Handle legacy blacklist settings
+          if (settings["incomingBlacklistIds"]) {
+            methodFilterIds = settings["incomingBlacklistIds"];
+          } else if (settings["methodFilterIds"]) {
+            methodFilterIds = settings["methodFilterIds"];
+          }
+          if (settings["filterMode"]) {
+            filterMode = settings["filterMode"];
+          }
           if (settings["maxLogs"] != null && !isNaN(parseInt(maxLogs))) {
             setLogValue(parseInt(settings["maxLogs"]));
           }
@@ -431,7 +624,8 @@
             $("#play-button").click();
           }
           $("#instance-filter").val(instanceFilter);
-          $("#blacklist-ids-incoming").val(incomingBlacklistIds.join(","));
+          $("#method-filter-ids").val(methodFilterIds.join(","));
+          $("#filter-mode").val(filterMode);
         }
         $("#maxlogs").val(maxLogs);
       }
@@ -442,7 +636,8 @@
           JSON.stringify({
             STATE: STATE,
             instanceFilter: instanceFilter,
-            incomingBlacklistIds: incomingBlacklistIds,
+            methodFilterIds: methodFilterIds,
+            filterMode: filterMode,
             maxLogs: maxLogs,
             darkMode: darkMode
           })

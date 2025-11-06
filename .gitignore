@@ -5,6 +5,6 @@ dist
 /src/config/config.json
 /.vs/
 /.idea/
-/dumps
-src/parser/test.ts
+/proto_samples/
 /_clean_samples
+/dumps
