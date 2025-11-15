@@ -1,17 +1,14 @@
 import http from "http";
 import fs from "fs";
 import {
+  WebStreamBuffer,
   getIPAddress,
+  handleData,
   moduleConfigIsAvailable,
   redirect_post_golbat,
 } from "./utils";
-import { WebStreamBuffer } from "./utils/web-stream-buffer";
-import { handleData as handleDataRaw } from "./utils";
-import {
-  sanitizeAndCloneForUI,
-  stripControlCharactersKeepVisible,
-} from "./utils/sanitize-utils";
 import { decodePayload, decodePayloadTraffic } from "./parser/proto-parser";
+import { dumpSixVariants } from "./utils/proto-dumper";
 
 // try looking if config file exists...
 let config = require("./config/example.config.json");
@@ -23,37 +20,8 @@ if (moduleConfigIsAvailable()) {
 const incomingProtoWebBufferInst = new WebStreamBuffer();
 const outgoingProtoWebBufferInst = new WebStreamBuffer();
 const portBind = config["default_port"];
-// 把任何类型 => 安全字符串
-const toStringSafe = (v: unknown): string => {
-  if (v == null) return ""; // null/undefined → ""
-  if (typeof v === "string")
-    // 字符串 → 去控制符
-    return stripControlCharactersKeepVisible(v);
-  try {
-    const cleaned = sanitizeAndCloneForUI(v); // 对象 → 清洗
-    const s =
-      typeof cleaned === "string"
-        ? stripControlCharactersKeepVisible(cleaned)
-        : JSON.stringify(cleaned);
-    return s ?? "";
-  } catch {
-    try {
-      return String(v);
-    } catch {
-      return "";
-    } // 兜底
-  }
-};
-const handleData = (
-  incoming: WebStreamBuffer,
-  outgoing: WebStreamBuffer,
-  identifier: any,
-  parsedData: any
-): void => {
-  const sanitizedStr = toStringSafe(parsedData);
-  handleDataRaw(incoming, outgoing, identifier, sanitizedStr);
-};
 
+// server
 const httpServer = http.createServer(function (req, res) {
   let incomingData: Array<Buffer> = [];
   switch (req.url) {
@@ -86,29 +54,84 @@ const httpServer = http.createServer(function (req, res) {
         }
         const identifier = parsedData["username"];
         for (let i = 0; i < parsedData["contents"].length; i++) {
+          const entry = parsedData["contents"][i];
+          const rawRequest = entry.request || "";
+          const rawResponse = entry.payload || "";
+
           const parsedRequestData = decodePayloadTraffic(
-            parsedData["contents"][i].type,
-            parsedData["contents"][i].request,
+            entry.type,
+            rawRequest,
             "request"
           );
+          const parsedResponseData = decodePayloadTraffic(
+            entry.type,
+            rawResponse,
+            "response"
+          );
+
+          // Legacy-style unparsed decode for local dumps
+          const unparsedRequestData = decodePayload(
+            [
+              {
+                method: entry.type,
+                data: rawRequest,
+              },
+            ],
+            "request"
+          );
+          const unparsedResponseData = decodePayload(
+            [
+              {
+                method: entry.type,
+                data: rawResponse,
+              },
+            ],
+            "response"
+          );
+
+          let methodName = String(entry.type) || "METHOD_unknown";
+          if (
+            parsedRequestData &&
+            typeof parsedRequestData !== "string" &&
+            Array.isArray(parsedRequestData) &&
+            parsedRequestData.length > 0
+          ) {
+            const firstParsedObject = parsedRequestData[0] as any;
+            if (firstParsedObject && typeof firstParsedObject === "object") {
+              methodName =
+                firstParsedObject.methodName ||
+                firstParsedObject.method ||
+                firstParsedObject.name ||
+                methodName;
+            }
+          }
+
+          // 强制保存 6 份: raw / unparsed / parsed, request / response
+          dumpSixVariants({
+            baseTimestampMilliseconds: Date.now(),
+            methodName,
+            rawRequest,
+            rawResponse,
+            unparserRequest: unparsedRequestData,
+            parserRequest: parsedRequestData,
+            unparserResponse: unparsedResponseData,
+            parserResponse: parsedResponseData,
+          });
+
           if (typeof parsedRequestData === "string") {
             incomingProtoWebBufferInst.write({ error: parsedRequestData });
           } else {
             for (let parsedObject of parsedRequestData) {
-              parsedObject.identifier = identifier;
+              (parsedObject as any).identifier = identifier;
               incomingProtoWebBufferInst.write(parsedObject);
             }
           }
-          const parsedResponseData = decodePayloadTraffic(
-            parsedData["contents"][i].type,
-            parsedData["contents"][i].payload,
-            "response"
-          );
+
           if (typeof parsedResponseData === "string") {
             outgoingProtoWebBufferInst.write({ error: parsedResponseData });
           } else {
             for (let parsedObject of parsedResponseData) {
-              parsedObject.identifier = identifier;
+              (parsedObject as any).identifier = identifier;
               outgoingProtoWebBufferInst.write(parsedObject);
             }
           }
@@ -161,7 +184,7 @@ const httpServer = http.createServer(function (req, res) {
           incomingProtoWebBufferInst.write({ error: parsedResponseData });
         } else {
           for (let parsedObject of parsedResponseData) {
-            parsedObject.identifier =
+            (parsedObject as any).identifier =
               parsedData["uuid"] ||
               parsedData["devicename"] ||
               parsedData["deviceName"] ||
@@ -185,7 +208,7 @@ const httpServer = http.createServer(function (req, res) {
           outgoingProtoWebBufferInst.write({ error: parsedRequestData });
         } else {
           for (let parsedObject of parsedRequestData) {
-            parsedObject.identifier =
+            (parsedObject as any).identifier =
               parsedData["uuid"] ||
               parsedData["devicename"] ||
               parsedData["deviceName"] ||
@@ -197,32 +220,42 @@ const httpServer = http.createServer(function (req, res) {
       break;
     case "/images/favicon.png":
       res.writeHead(200, { "Content-Type": "image/png" });
-      const favicon = fs.readFileSync("./dist/views/images/favicon.png");
-      res.end(favicon);
+      {
+        const favicon = fs.readFileSync("./dist/views/images/favicon.png");
+        res.end(favicon);
+      }
       break;
     case "/css/style.css":
       res.writeHead(200, { "Content-Type": "text/css" });
-      const pageCssL = fs.readFileSync("./dist/views/css/style.css");
-      res.end(pageCssL);
+      {
+        const pageCssL = fs.readFileSync("./dist/views/css/style.css");
+        res.end(pageCssL);
+      }
       break;
     case "/json-viewer/jquery.json-viewer.css":
       res.writeHead(200, { "Content-Type": "text/css" });
-      const pageCss = fs.readFileSync(
-        "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.css"
-      );
-      res.end(pageCss);
+      {
+        const pageCss = fs.readFileSync(
+          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.css"
+        );
+        res.end(pageCss);
+      }
       break;
     case "/json-viewer/jquery.json-viewer.js":
       res.writeHead(200, { "Content-Type": "text/javascript" });
-      const pageJs = fs.readFileSync(
-        "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.js"
-      );
-      res.end(pageJs);
+      {
+        const pageJs = fs.readFileSync(
+          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.js"
+        );
+        res.end(pageJs);
+      }
       break;
     case "/":
       res.writeHead(200, { "Content-Type": "text/html" });
-      const pageHTML = fs.readFileSync("./dist/views/print-protos.html");
-      res.end(pageHTML);
+      {
+        const pageHTML = fs.readFileSync("./dist/views/print-protos.html");
+        res.end(pageHTML);
+      }
       break;
     default:
       res.end("Unsupported url: " + req.url);
@@ -231,14 +264,14 @@ const httpServer = http.createServer(function (req, res) {
 });
 
 var io = require("socket.io")(httpServer);
-var incoming = io.of("/incoming").on("connection", function (socket) {
+var incoming = io.of("/incoming").on("connection", function (socket: any) {
   const reader = {
     read: function (data: object) {
       incoming.emit("protos", data);
     },
   };
   incomingProtoWebBufferInst.addReader(reader);
-  socket.on("error", function (err) {
+  socket.on("error", function (err: unknown) {
     console.log("WebSockets Error: ", err);
   });
   socket.on("disconnect", function () {
@@ -246,14 +279,14 @@ var incoming = io.of("/incoming").on("connection", function (socket) {
   });
 });
 
-var outgoing = io.of("/outgoing").on("connection", function (socket) {
+var outgoing = io.of("/outgoing").on("connection", function (socket: any) {
   const reader = {
     read: function (data: object) {
       outgoing.emit("protos", data);
     },
   };
   outgoingProtoWebBufferInst.addReader(reader);
-  socket.on("error", function (err) {
+  socket.on("error", function (err: unknown) {
     console.log("WebSockets Error: ", err);
   });
   socket.on("disconnect", function () {

@@ -1,139 +1,131 @@
 import { networkInterfaces } from "os";
 import http from "http";
 import { parse } from "url";
-import { stripControlCharactersKeepVisible } from "./sanitize-utils";
 import { WebStreamBuffer } from "./web-stream-buffer";
-import { decodePayloadTraffic } from "../parser/proto-parser";
-import { extractRallyDetails } from "./rally-extractor";
+import { dumpSixVariants } from "./proto-dumper";
+import { decodePayloadTraffic, decodePayload } from "../parser/proto-parser";
 
-export const b64Decode = (data: string) => {
+export const b64Decode = (data: string): Buffer => {
+  if (!data || data === "") {
+    return Buffer.alloc(0);
+  }
   return Buffer.from(data, "base64");
 };
 
-export function moduleConfigIsAvailable() {
+export function moduleConfigIsAvailable(): boolean {
   try {
-    require.resolve("../config/config.json");
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require("../config/config.json");
     return true;
   } catch (e) {
     return false;
   }
 }
 
-export function getIPAddress() {
-  var interfaces = networkInterfaces();
-  for (var devName in interfaces) {
-    var iface: any = interfaces[devName];
-    for (var i = 0; i < iface.length; i++) {
-      var alias = iface[i];
+export function getIPAddress(): string {
+  const interfaces = networkInterfaces();
+  for (const devName in interfaces) {
+    const iface: any = interfaces[devName];
+    if (!iface) {
+      continue;
+    }
+    for (let i = 0; i < iface.length; i++) {
+      const alias = iface[i];
       if (
         alias.family === "IPv4" &&
         alias.address !== "127.0.0.1" &&
         !alias.internal
-      )
+      ) {
         return alias.address;
+      }
     }
   }
   return "0.0.0.0";
 }
 
+/**
+ * Shared handler for Trafficlight style messages.
+ */
 export function handleData(
   incoming: WebStreamBuffer,
   outgoing: WebStreamBuffer,
   identifier: any,
-  parsedData: any // 允许 string/object/undefined
-) {
-  // 1) 规整为字符串
-  let text: string;
-  if (typeof parsedData === "string") {
-    text = stripControlCharactersKeepVisible(parsedData);
-  } else if (parsedData == null) {
-    text = "";
-  } else {
-    try {
-      text = JSON.stringify(parsedData);
-    } catch {
-      text = String(parsedData ?? "");
-    }
+  parsedData: any
+): void {
+  if (!parsedData || !parsedData.protos || !Array.isArray(parsedData.protos)) {
+    return;
   }
 
-  // 2) 尝试 JSON.parse → 对象
-  let root: any;
-  try {
-    root = text ? JSON.parse(text) : {};
-  } catch {
-    root = {};
-  }
+  for (let i = 0; i < parsedData.protos.length; i++) {
+    const entry = parsedData.protos[i];
 
-  // 3) 兜底得到 protos 数组
-  const protos: any[] = Array.isArray(root?.protos) ? root.protos : [];
+    const rawRequest = entry.request || "";
+    const rawResponse = entry.response || "";
+    const method: number = entry.method;
 
-  // 4) 只用 item，不再访问 parsedData["protos"][i]
-  for (let i = 0; i < protos.length; i++) {
-    const item = protos[i];
-    if (!item || typeof item !== "object") continue;
-
-    const rawMethod = (item as any).method;
-    const request = (item as any).request;
-    const response = (item as any).response;
-
-    // 规整 method 为 number，非数字则跳过
-    const methodId: number =
-      typeof rawMethod === "number"
-        ? rawMethod
-        : typeof rawMethod === "string" && /^\d+$/.test(rawMethod)
-        ? Number(rawMethod)
-        : NaN;
-
-    if (!Number.isFinite(methodId)) continue;
-
-    // —— request —— //
-    // —— request —— //
     const parsedRequestData = decodePayloadTraffic(
-      methodId,
-      request,
+      method,
+      rawRequest,
       "request"
     );
+    const parsedResponseData = decodePayloadTraffic(
+      method,
+      rawResponse,
+      "response"
+    );
+
+    const unparsedRequestData = decodePayload(
+      [{ method, data: rawRequest }],
+      "request"
+    );
+    const unparsedResponseData = decodePayload(
+      [{ method, data: rawResponse }],
+      "response"
+    );
+
+    let methodName = String(method) || "METHOD_unknown";
+    if (
+      parsedRequestData &&
+      typeof parsedRequestData !== "string" &&
+      Array.isArray(parsedRequestData) &&
+      parsedRequestData.length > 0
+    ) {
+      const firstParsedObject: any = parsedRequestData[0];
+      if (firstParsedObject && typeof firstParsedObject === "object") {
+        methodName =
+          firstParsedObject.methodName ||
+          firstParsedObject.method ||
+          firstParsedObject.name ||
+          methodName;
+      }
+    }
+
+    dumpSixVariants({
+      baseTimestampMilliseconds: Date.now(),
+      methodName,
+      rawRequest,
+      rawResponse,
+      unparserRequest: unparsedRequestData,
+      parserRequest: parsedRequestData,
+      unparserResponse: unparsedResponseData,
+      parserResponse: parsedResponseData,
+    });
+
     if (typeof parsedRequestData === "string") {
       incoming.write({ error: parsedRequestData });
     } else if (Array.isArray(parsedRequestData)) {
       for (const parsedObject of parsedRequestData) {
         (parsedObject as any).identifier = identifier;
         incoming.write(parsedObject);
-
-        // ★ 提取并单独写给 UI
-        const detailsReq = extractRallyDetails(parsedObject);
-        if (detailsReq.length) {
-          incoming.write({
-            type: "RALLY_DETAILS",
-            method: methodId,
-            details: detailsReq,
-          });
-        }
       }
     }
 
-    // —— response —— //
-    const parsedResponseData = decodePayloadTraffic(
-      methodId,
-      response,
-      "response"
-    );
     if (typeof parsedResponseData === "string") {
       outgoing.write({ error: parsedResponseData });
     } else if (Array.isArray(parsedResponseData)) {
       for (const parsedObject of parsedResponseData) {
         (parsedObject as any).identifier = identifier;
         outgoing.write(parsedObject);
-
-        // ★ 提取并单独写给 UI
-        const detailsRes = extractRallyDetails(parsedObject);
-        if (detailsRes.length) {
-          outgoing.write({
-            type: "RALLY_DETAILS",
-            method: methodId,
-            details: detailsRes,
-          });
-        }
       }
     }
   }
@@ -141,12 +133,13 @@ export function handleData(
 
 export function redirect_post_golbat(
   redirect_url: string,
-  redirect_token: string,
-  redirect_data: any
-) {
+  redirect_token: string | null,
+  redirect_data: string
+): void {
   const url = parse(redirect_url);
-  const headers = {
+  const headers: http.OutgoingHttpHeaders = {
     "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(redirect_data).toString(),
   };
   if (redirect_token) {
     headers["Authorization"] = "Bearer " + redirect_token;
@@ -154,9 +147,9 @@ export function redirect_post_golbat(
   const request = http.request({
     method: "POST",
     headers: headers,
-    host: url.hostname,
+    host: url.hostname || undefined,
     port: url.port,
-    path: url.path,
+    path: url.path || undefined,
   });
   request.write(redirect_data);
   request.end();
