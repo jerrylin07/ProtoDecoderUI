@@ -52,7 +52,7 @@ function isAuthenticated(req: http.IncomingMessage): boolean {
 }
 function requireAuth(
   req: http.IncomingMessage,
-  res: http.ServerResponse<http.IncomingMessage>
+  res: http.ServerResponse<http.IncomingMessage>,
 ): boolean {
   if (!AUTH_REQUIRED) {
     return true;
@@ -68,7 +68,7 @@ function requireAuth(
 }
 const httpServer = http.createServer(function (
   req: http.IncomingMessage,
-  res: http.ServerResponse<http.IncomingMessage>
+  res: http.ServerResponse<http.IncomingMessage>,
 ) {
   let incomingData: Array<Buffer> = [];
   if (req.url === "/login" && req.method === "GET") {
@@ -87,7 +87,7 @@ const httpServer = http.createServer(function (
         JSON.stringify({
           success: false,
           message: "Login page not found",
-        })
+        }),
       );
     }
     return;
@@ -118,7 +118,7 @@ const httpServer = http.createServer(function (
             JSON.stringify({
               success: false,
               message: "Invalid password",
-            })
+            }),
           );
         }
       } catch (err) {
@@ -127,7 +127,7 @@ const httpServer = http.createServer(function (
           JSON.stringify({
             success: false,
             message: "Invalid request",
-          })
+          }),
         );
       }
     });
@@ -168,7 +168,7 @@ const httpServer = http.createServer(function (
             JSON.stringify({
               success: false,
               message: "Invalid JSON payload",
-            })
+            }),
           );
           return;
         }
@@ -191,7 +191,7 @@ const httpServer = http.createServer(function (
             redirect_post_golbat(
               config["redirect_to_golbat_url"],
               config["redirect_to_golbat_token"],
-              JSON.stringify(parsedData)
+              JSON.stringify(parsedData),
             );
           } catch (err) {
             console.error("Endpoint golbat offline or bad! " + err);
@@ -208,12 +208,12 @@ const httpServer = http.createServer(function (
           const parsedRequestData = decodePayloadTraffic(
             entry.type,
             rawRequest,
-            "request"
+            "request",
           );
           const parsedResponseData = decodePayloadTraffic(
             entry.type,
             rawResponse,
-            "response"
+            "response",
           );
           const unparsedRequestData = decodePayload(
             [
@@ -222,7 +222,7 @@ const httpServer = http.createServer(function (
                 data: rawRequest,
               },
             ],
-            "request"
+            "request",
           );
           const unparsedResponseData = decodePayload(
             [
@@ -231,7 +231,7 @@ const httpServer = http.createServer(function (
                 data: rawResponse,
               },
             ],
-            "response"
+            "response",
           );
           let methodName = String(entry.type) || "METHOD_unknown";
           if (
@@ -284,7 +284,7 @@ const httpServer = http.createServer(function (
             JSON.stringify({
               success: false,
               message: "Invalid JSON payload",
-            })
+            }),
           );
           return;
         }
@@ -296,7 +296,7 @@ const httpServer = http.createServer(function (
               incomingProtoWebBufferInst,
               outgoingProtoWebBufferInst,
               identifier,
-              parsedData[i]
+              parsedData[i],
             );
           }
         } else {
@@ -304,7 +304,7 @@ const httpServer = http.createServer(function (
             incomingProtoWebBufferInst,
             outgoingProtoWebBufferInst,
             identifier,
-            parsedData
+            parsedData,
           );
         }
       });
@@ -324,7 +324,7 @@ const httpServer = http.createServer(function (
             JSON.stringify({
               success: false,
               message: "Invalid JSON payload",
-            })
+            }),
           );
           return;
         }
@@ -332,7 +332,7 @@ const httpServer = http.createServer(function (
         res.end("");
         const parsedResponseData = decodePayload(
           parsedData.contents,
-          "response"
+          "response",
         );
         for (const parsedObject of parsedResponseData) {
           (parsedObject as any).identifier =
@@ -359,7 +359,7 @@ const httpServer = http.createServer(function (
             JSON.stringify({
               success: false,
               message: "Invalid JSON payload",
-            })
+            }),
           );
           return;
         }
@@ -394,7 +394,7 @@ const httpServer = http.createServer(function (
       res.writeHead(200, { "Content-Type": "text/css" });
       {
         const pageCss = fs.readFileSync(
-          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.css"
+          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.css",
         );
         res.end(pageCss);
       }
@@ -403,7 +403,7 @@ const httpServer = http.createServer(function (
       res.writeHead(200, { "Content-Type": "text/javascript" });
       {
         const pageJs = fs.readFileSync(
-          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.js"
+          "node_modules/jquery.json-viewer/json-viewer/jquery.json-viewer.js",
         );
         res.end(pageJs);
       }
@@ -422,7 +422,7 @@ const httpServer = http.createServer(function (
           JSON.stringify({
             success: false,
             message: "Main page not found",
-          })
+          }),
         );
       }
       break;

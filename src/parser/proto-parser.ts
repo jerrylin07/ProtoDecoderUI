@@ -4,55 +4,79 @@ import { DecodedProto } from "../types";
 
 let action_social = 0;
 
-/**
- * 解析 Social / Proxy 内层 payload（基于外层 action_social method）
- */
+// [MODIFIED] Output mode:
+// - parser: enum values are converted to names
+// - unparser: enum values stay numeric
+export type DecodeOutputMode = "parser" | "unparser";
+
+// [MODIFIED] Shared protobuf message -> plain object conversion.
+function convertDecodedMessageToObject(
+  messageType: any,
+  decodedMessage: any,
+  outputMode: DecodeOutputMode,
+): any {
+  if (messageType?.toObject && typeof messageType.toObject === "function") {
+    return messageType.toObject(decodedMessage, {
+      longs: String,
+      enums: outputMode === "unparser" ? Number : String,
+      bytes: String,
+      json: true,
+    });
+  }
+  if (decodedMessage?.toJSON && typeof decodedMessage.toJSON === "function") {
+    return decodedMessage.toJSON();
+  }
+  return decodedMessage;
+}
+
+// [MODIFIED] Internal response payload decoding now follows outputMode too.
 function decodeInternalPayloadAsResponse(
   method: number,
-  data: any
+  data: any,
+  outputMode: DecodeOutputMode,
 ): any {
   action_social = 0;
   let result: any = { Not_Implemented_yet: data };
-
   if (!data) {
     return {};
   }
 
   const values = Object.values(requestMessagesResponses) as any[];
-
   for (let i = 0; i < values.length; i++) {
     const protoTuple: any = values[i];
     const requestMethodId = protoTuple[0];
-
-    if (requestMethodId === method) {
-      if (
-        protoTuple[2] != null &&
-        typeof data === "string" &&
-        data &&
-        b64Decode(data).length > 0
-      ) {
-        try {
-          result = protoTuple[2].decode(b64Decode(data)).toJSON();
-        } catch (error: any) {
-          console.error(
-            `Internal ProxySocial decoder ${requestMethodId} Error: ${error}`
-          );
-          result = {
-            Error: error,
-            Data: data,
-          };
-        }
-      }
-      return result;
+    if (requestMethodId !== method) {
+      continue;
     }
-  }
 
+    if (
+      protoTuple[2] != null &&
+      typeof data === "string" &&
+      data &&
+      b64Decode(data).length > 0
+    ) {
+      try {
+        const decodedMessage = protoTuple[2].decode(b64Decode(data));
+        result = convertDecodedMessageToObject(
+          protoTuple[2],
+          decodedMessage,
+          outputMode,
+        );
+      } catch (error: any) {
+        console.error(
+          `Internal ProxySocial decoder ${requestMethodId} Error: ${error}`,
+        );
+        result = {
+          Error: error,
+          Data: data,
+        };
+      }
+    }
+    return result;
+  }
   return result;
 }
 
-/**
- * 去掉 Method 名称前缀，便于前端展示
- */
 function remasterOrCleanMethodString(str: string): string {
   return str
     .replace(/^REQUEST_TYPE_/, "")
@@ -68,63 +92,48 @@ function remasterOrCleanMethodString(str: string): string {
     .replace(/^TITAN_PLAYER_SUBMISSION_ACTION_/, "");
 }
 
-/**
- * 用于 /traffic、/golbat 之类「单条」场景：
- * 传入一个 methodId + content，返回 DecodedProto[]
- * 若解析失败会返回空数组（错误信息包装在 DecodedProto.data 中）
- */
 export const decodePayloadTraffic = (
   methodId: number,
   content: any,
-  dataType: string
+  dataType: string,
+  // [MODIFIED] outputMode is explicit; defaults to parser for compatibility.
+  outputMode: DecodeOutputMode = "parser",
 ): DecodedProto[] => {
   const parsedProtoData: DecodedProto[] = [];
-  const decodedProto = decodeProto(methodId, content, dataType);
-
+  const decodedProto = decodeProto(methodId, content, dataType, outputMode);
   if (typeof decodedProto !== "string") {
     parsedProtoData.push(decodedProto);
   }
-
   return parsedProtoData;
 };
 
-/**
- * 用于 /debug、/raw 之类「批量 contents」场景：
- * contents: [{ method, data }, ...]
- */
 export const decodePayload = (
   contents: any,
-  dataType: string
+  dataType: string,
+  // [MODIFIED] outputMode is explicit; defaults to parser for compatibility.
+  outputMode: DecodeOutputMode = "parser",
 ): DecodedProto[] => {
   const parsedProtoData: DecodedProto[] = [];
-
   for (const proto of contents) {
     const methodId = proto.method;
     const data = proto.data;
-    const decodedProto = decodeProto(methodId, data, dataType);
+    const decodedProto = decodeProto(methodId, data, dataType, outputMode);
     if (typeof decodedProto !== "string") {
       parsedProtoData.push(decodedProto);
     }
   }
-
   return parsedProtoData;
 };
 
-/**
- * 核心解析逻辑：
- * - 根据 methodId 在 requestMessagesResponses 中找到对应的 tuple
- * - 按 dataType = "request" / "response" 选择 tuple[1] / tuple[2] 类型解码
- * - Social 特殊 case：外层 5012 存 action，内层 payload 再解一层
- * - 解析失败 / 未实现 / 未知 method 都会包装成 DecodedProto 返回，方便前端展示
- */
 export const decodeProto = (
   method: number,
   data: string,
-  dataType: string
+  dataType: string,
+  // [MODIFIED] parser=enum name, unparser=enum number.
+  outputMode: DecodeOutputMode = "parser",
 ): DecodedProto | string => {
   let returnObject: DecodedProto | string = "Not Found";
   let methodFound = false;
-
   const keys = Object.keys(requestMessagesResponses);
   const values = Object.values(requestMessagesResponses) as any[];
 
@@ -132,54 +141,62 @@ export const decodeProto = (
     const foundMethod: any = values[i];
     const foundMethodString: string = keys[i];
     const foundReq = foundMethod[0] as number;
-
     if (foundReq !== method) {
       continue;
     }
 
     methodFound = true;
-
-    // -------------------- Request --------------------
     if (dataType === "request") {
       if (foundMethod[1] != null) {
         try {
           let parsedData: any;
-
           if (!data || data === "") {
             parsedData = {};
           } else {
-            parsedData = foundMethod[1].decode(b64Decode(data)).toJSON();
+            // [MODIFIED] Outer request is converted with outputMode.
+            const decodedMessage = foundMethod[1].decode(b64Decode(data));
+            parsedData = convertDecodedMessageToObject(
+              foundMethod[1],
+              decodedMessage,
+              outputMode,
+            );
           }
 
-          // Social / Proxy：记录 action，并尝试解内层 payload
+          // [MODIFIED] Keep full inner payload expansion for both parser/unparser.
           if (foundReq === 5012) {
             action_social = parsedData?.action ?? 0;
-
+            const payloadRaw = parsedData?.payload;
             if (
               action_social > 0 &&
-              parsedData?.payload &&
-              typeof parsedData.payload === "string" &&
-              b64Decode(parsedData.payload)
+              typeof payloadRaw === "string" &&
+              payloadRaw &&
+              b64Decode(payloadRaw).length > 0
             ) {
+              parsedData.payload_raw = payloadRaw;
               const valuesInner = Object.values(
-                requestMessagesResponses
+                requestMessagesResponses,
               ) as any[];
-
               valuesInner.forEach((tuple: any) => {
                 const reqId = tuple[0];
-                if (
-                  reqId === action_social &&
-                  tuple[1] != null &&
-                  parsedData.payload
-                ) {
+                if (reqId === action_social && tuple[1] != null) {
                   try {
-                    parsedData.payload = tuple[1]
-                      .decode(b64Decode(parsedData.payload))
-                      .toJSON();
+                    const innerDecodedMessage = tuple[1].decode(
+                      b64Decode(payloadRaw),
+                    );
+                    parsedData.payload_parsed = convertDecodedMessageToObject(
+                      tuple[1],
+                      innerDecodedMessage,
+                      outputMode,
+                    );
                   } catch (error: any) {
                     console.error(
-                      `Internal ProxySocial request decoder ${reqId} Error: ${error}`
+                      `Internal ProxySocial request decoder ${reqId} Error: ${error}`,
                     );
+                    parsedData.payload_parsed = {
+                      error: "Failed to decode internal request payload",
+                      rawBase64: payloadRaw,
+                      errorMessage: error?.toString?.() ?? String(error),
+                    };
                   }
                 }
               });
@@ -193,7 +210,7 @@ export const decodeProto = (
           };
         } catch (error: any) {
           console.error(
-            `Error parsing request ${foundMethodString} -> ${error}`
+            `Error parsing request ${foundMethodString} -> ${error}`,
           );
           returnObject = {
             methodId: String(foundReq),
@@ -207,7 +224,6 @@ export const decodeProto = (
           };
         }
       } else {
-        // 没有实现 request 类型
         console.warn(`Request ${foundReq} Not Implemented`);
         returnObject = {
           methodId: String(foundReq),
@@ -220,29 +236,36 @@ export const decodeProto = (
           },
         };
       }
-
-      // 找到匹配 method 后直接跳出循环
       break;
     }
 
-    // -------------------- Response --------------------
     if (dataType === "response") {
       if (foundMethod[2] != null) {
         try {
           let parsedData: any;
-
           if (!data || data === "") {
             parsedData = {};
           } else {
-            parsedData = foundMethod[2].decode(b64Decode(data)).toJSON();
+            // [MODIFIED] Outer response is converted with outputMode.
+            const decodedMessage = foundMethod[2].decode(b64Decode(data));
+            parsedData = convertDecodedMessageToObject(
+              foundMethod[2],
+              decodedMessage,
+              outputMode,
+            );
           }
 
-          // Social 内层 payload 再解一层
-          if (foundReq === 5012 && action_social > 0 && parsedData?.payload) {
-            parsedData.payload = decodeInternalPayloadAsResponse(
-              action_social,
-              parsedData.payload
-            );
+          // [MODIFIED] Keep full inner payload expansion for both parser/unparser.
+          if (foundReq === 5012 && action_social > 0) {
+            const payloadRaw = parsedData?.payload;
+            if (payloadRaw) {
+              parsedData.payload_raw = payloadRaw;
+              parsedData.payload_parsed = decodeInternalPayloadAsResponse(
+                action_social,
+                payloadRaw,
+                outputMode,
+              );
+            }
           }
 
           returnObject = {
@@ -252,7 +275,7 @@ export const decodeProto = (
           };
         } catch (error: any) {
           console.error(
-            `Error parsing response ${foundMethodString} method: [${foundReq}] -> ${error}`
+            `Error parsing response ${foundMethodString} method: [${foundReq}] -> ${error}`,
           );
           returnObject = {
             methodId: String(foundReq),
@@ -266,7 +289,6 @@ export const decodeProto = (
           };
         }
       } else {
-        // 没有实现 response 类型
         console.warn(`Response ${foundReq} Not Implemented`);
         returnObject = {
           methodId: String(foundReq),
@@ -279,13 +301,10 @@ export const decodeProto = (
           },
         };
       }
-
-      // 找到匹配 method 后直接跳出循环
       break;
     }
   }
 
-  // 完全没有匹配的 methodId
   if (!methodFound && returnObject === "Not Found") {
     returnObject = {
       methodId: String(method),

@@ -63,24 +63,29 @@ export function handleData(
     const rawResponse = entry.response || "";
     const method: number = entry.method;
 
+    // [替换] parser/unparser 都展开 payload；仅枚举输出格式不同。
     const parsedRequestData = decodePayloadTraffic(
       method,
       rawRequest,
-      "request"
+      "request",
+      "parser"
     );
     const parsedResponseData = decodePayloadTraffic(
       method,
       rawResponse,
-      "response"
+      "response",
+      "parser"
     );
 
     const unparsedRequestData = decodePayload(
       [{ method, data: rawRequest }],
-      "request"
+      "request",
+      "unparser"
     );
     const unparsedResponseData = decodePayload(
       [{ method, data: rawResponse }],
-      "response"
+      "response",
+      "unparser"
     );
 
     let methodName = String(method) || "METHOD_unknown";
